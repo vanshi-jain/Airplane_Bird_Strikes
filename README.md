@@ -5,6 +5,8 @@
 This project focuses on analyzing bird strike data provided by the Federal Aviation Administration (FAA) to gain insights into bird strike occurrences at airports. 
 The analysis aims to identify risk factors, assess mitigation strategies, and highlight seasonal trends in bird strike occurrences.
 
+![alt text](https://github.com/vanshi-jain/Airplane_Bird_Strikes/blob/master/Bird%20Strikes%20In%20US%202000-2011.png)
+
 ## Key Contributions
 
 - Developed a logical data model and relational schema for FAA bird strike data.
