@@ -27,16 +27,14 @@ options(sqldf.driver = "SQLite")
 ## connecting to the cloud database hosted on gcloud
 ```{r conn,echo = FALSE, eval=TRUE,warning=FALSE}
 # Create a connection to the SQLite database 
-host = "34.132.22.210"
+host = ""
 user = "root"
-password = "Vansh2024!"
 port <- 3306
 
 condb <- dbConnect(MySQL(), 
                  host = host, 
                  port= port,
                  user = user, 
-                 password = password,
                  dbname = "strikes")
 
 ```
