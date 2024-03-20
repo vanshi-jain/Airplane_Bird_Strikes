@@ -1,0 +1,446 @@
+---
+title: "Analysis of Wildlife Strikes to Aircraft"
+author: "Vanshika Jain"
+date: "Spring 2024"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document:
+    df_print: paged
+email: jain.van@northeastern.edu
+subtitle: Practicum I CS5200
+---
+## Installing all required packages
+```{r installer,echo = FALSE, eval=TRUE,warning=FALSE}
+packages <- c("DBI", "tidyverse", "sqldf", "dplyr", "hash", "stringr", "RMySQL", "ggplot2", "RSQLite", "lubridate", "tidyr","tinytex")
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+options(sqldf.driver = "SQLite")
+
+```
+## connecting to the cloud database hosted on gcloud
+```{r conn,echo = FALSE, eval=TRUE,warning=FALSE}
+# Create a connection to the SQLite database 
+host = "34.132.22.210"
+user = "root"
+password = "Vansh2024!"
+port <- 3306
+
+condb <- dbConnect(MySQL(), 
+                 host = host, 
+                 port= port,
+                 user = user, 
+                 password = password,
+                 dbname = "strikes")
+
+```
+## set constraint FK and drop tables
+```{r drop,echo = FALSE, eval=TRUE,warning=FALSE}
+# turn off foreign key constraint to drop tables
+dbExecute(condb,"SET foreign_key_checks = 0;")
+
+dbExecute(condb, "DROP TABLE IF EXISTS airports")
+dbExecute(condb, "DROP TABLE IF EXISTS flights")
+dbExecute(condb, "DROP TABLE IF EXISTS strikes")
+dbExecute(condb, "DROP TABLE IF EXISTS conditions")
+```
+## create new tables
+```{r create,echo = FALSE, eval=TRUE,warning=FALSE}
+# create all tables - first create airports table for references
+# turn on foreign key constraint to create connections
+dbExecute(condb,"SET foreign_key_checks = 1;")
+# airports table
+dbExecute(condb, "CREATE TABLE IF NOT EXISTS airports(
+                    aid INT PRIMARY KEY NOT NULL,
+                    airportName TEXT,
+                    airportState TEXT,
+                    airportCode VARCHAR(3) DEFAULT 'ZZZ');
+")
+
+# flights table
+dbExecute(condb, "CREATE TABLE IF NOT EXISTS flights (
+                  fid INT PRIMARY KEY NOT NULL,
+                  month INT NOT NULL,
+                  origin INT NOT NULL,
+                  airlineName TEXT,
+                  aircraftType TEXT,
+                  isHeavy BOOLEAN NOT NULL,
+                  CONSTRAINT origin_fk FOREIGN KEY (origin)  REFERENCES airports(aid)
+);
+")
+# conditions lookup table
+dbExecute(condb, "CREATE TABLE IF NOT EXISTS conditions (
+                  cid INT AUTO_INCREMENT PRIMARY KEY,
+                  sky_condition VARCHAR(255) DEFAULT 'Unknown',
+                  explanation VARCHAR(255) DEFAULT 'Unknown'
+);
+")
+# strikes table
+dbExecute(condb, "CREATE TABLE IF NOT EXISTS strikes (
+                  sid INT AUTO_INCREMENT PRIMARY KEY,
+                  fid INT NOT NULL,
+                  numbirds INT DEFAULT 0,
+                  impact VARCHAR(255) DEFAULT 'None',
+                  damage BOOLEAN NOT NULL,
+                  altitude INT CHECK (altitude >= 0) NOT NULL,
+                  conditions INT NOT NULL,
+                  CONSTRAINT flight_id FOREIGN KEY (fid) REFERENCES flights(fid),
+                  CONSTRAINT sky_id FOREIGN KEY (conditions) REFERENCES conditions(cid)
+);
+")
+```
+## check the table info
+```{r check,echo = FALSE, eval=TRUE,warning=FALSE}
+# check the table info
+air <- dbGetQuery(condb, "DESCRIBE airports")
+fl <- dbGetQuery(condb, "DESCRIBE flights")
+sky <- dbGetQuery(condb, "DESCRIBE conditions")
+str <- dbGetQuery(condb, "DESCRIBE strikes")
+
+checkAir <- dbGetQuery(condb, "SELECT * FROM airports LIMIT 10")
+checkflt <- dbGetQuery(condb, "SELECT  * FROM flights LIMIT 10")
+checkstr <- dbGetQuery(condb, "SELECT * FROM strikes LIMIT 10")
+checksky <- dbGetQuery(condb, "SELECT * FROM conditions")
+
+```
+## read the csv data file
+```{r readfile,echo = FALSE, eval=TRUE,warning=FALSE}
+# read the csv data file and remove blanks or null rows
+bds.raw <- read.csv(file = "BirdStrikesData-V3.csv", header = TRUE, stringsAsFactors = FALSE, strip.white = TRUE, sep=',')
+
+bds.raw <- bds.raw[!(is.na(bds.raw$model) | bds.raw$model == ""), ]
+bds.raw <- bds.raw[!(is.na(bds.raw$aircraft) | bds.raw$aircraft == ""), ]
+bds.raw <- bds.raw[!(is.na(bds.raw$airline) | bds.raw$airline == ""), ]
+
+df <- bds.raw[c("rid", "flight_date", "aircraft", "airline","airport", "impact", "damage", "origin", "sky_conditions", "altitude_ft", "heavy_flag")]
+
+print(names(df))
+```
+## find the unique sky conditions to add in the table
+```{r sky,echo = FALSE, eval=TRUE,warning=FALSE}
+# Insert data into the conditions table
+sky_conditions <- unique(df[c("sky_conditions")])
+print(sky_conditions)
+```
+## insert data into conditions table
+```{r condition,echo = FALSE, eval=TRUE,warning=FALSE}
+dbExecute(condb, "INSERT INTO conditions (cid, sky_condition) VALUES (1,'No Cloud'), (2,'Some Cloud'), (3,'Overcast');")
+# check the updated table
+checksky <- dbGetQuery(condb, "SELECT * FROM conditions")
+```
+## insert data into airports 
+```{r airports,echo = FALSE, eval=TRUE,warning=FALSE}
+# add data into airports with some functions to handle extra strings 
+data = unique(df[c("airport", "origin")])
+data$aid = rownames(data)
+
+airports <- data.frame(airportName = data$airport, airportState = data$origin, aid = data$aid)
+
+airports$airportName <- sapply(airports[,'airportName'], function(x){if (grepl("\\'",x)){return(gsub("'", "", x, fixed=TRUE))} else {return(x)} })
+
+airports$airportState <- sapply(airports[,'airportState'], function(x){if(grepl("\\'",x)) {return(gsub("'", "", x, fixed=TRUE))} else {return(x)}  })
+
+# write this data frame into the table airports
+dbWriteTable(condb, "airports", airports,row.names=FALSE, append=TRUE)
+
+checkAir <- dbGetQuery(condb, "SELECT DISTINCT * FROM airports LIMIT 10")
+
+```
+## insert data into flights table
+```{r temp,echo = FALSE, eval=TRUE,warning=FALSE}
+# creating a temp table to store rid with origin and airport name
+temp = data.frame(unique(df[c("rid", "airport", "origin")]))
+dbExecute(condb, "DROP TABLE IF EXISTS x")
+dbExecute(condb, "CREATE TABLE x(
+                  rid INT,
+                  origin VARCHAR(255),
+                  airport VARCHAR(255));")
+
+dbWriteTable(condb, "x", temp, row.names=FALSE, append = TRUE)
+```
+```{r tempflight,echo = FALSE, eval=TRUE,warning=FALSE}
+# add data into flights table with aid FK
+dbExecute(condb, "SET foreign_key_checks = 1;")
+
+flights = unique(df[c("rid","flight_date", "heavy_flag", "airline", "aircraft")])
+
+# creating a df with proper col names 
+dfb = data.frame(fid = flights$rid, flight_date = flights$flight_date ,airlineName = flights$airline, aircraftType = flights$aircraft, isHeavy = flights$heavy_flag )
+
+# changing the is heavy col with bool values
+dfb$isHeavy = sapply(flights[, 'heavy_flag'], function(x){
+  if(x=='Yes'){return(TRUE)} else{return(FALSE)}
+})
+dfb$isHeavy = as.integer(dfb$isHeavy)
+
+# find the month and append a col for later use
+dfb$month = sapply(flights[, 'flight_date'], function(x){
+  val <- strsplit(x," ")[[1]][1]
+  month <- strsplit(val,"/")[[1]][1]
+  date <- strsplit(val,"/")[[1]][2]
+  year <- strsplit(val,"/")[[1]][3]
+  output = paste(year,"-",month,"-",date,sep="")
+  return(month(ymd(output))) 
+  })
+```
+
+```{r flights,echo = FALSE, eval=TRUE,warning=FALSE}
+# creating another dummy table to store the imp info needed for flights and join with previous table
+dbExecute(condb, "DROP TABLE IF EXISTS y")
+dbExecute(condb, "CREATE TABLE y(
+                  fid INT,
+                  flight_date DATE,
+                  airlineName TEXT,
+                  aircraftType TEXT,
+                  isHeavy BOOL,
+                  month INT);")
+
+
+dbWriteTable(condb, "y", dfb, row.names=FALSE, append = TRUE)
+
+# getting all the cols from both tables using inner join on rid and airport name and state
+final <- dbGetQuery(condb, "select * from 
+
+                    (select a.rid,b.aid from airports b
+                           INNER JOIN x a 
+                           ON a.airport = b.airportName and a.origin = b.airportState) a
+                           
+                    inner join y b
+                    on a.rid = b.fid")
+
+# drop the extra tables
+dbExecute(condb, "DROP TABLE IF EXISTS x")
+dbExecute(condb, "DROP TABLE IF EXISTS y")
+
+# just select the required cols and remove redundant info
+final = final[c("fid", "aid", "airlineName", "aircraftType", "isHeavy", "month")]
+
+# renamed the col as required
+names(final)[names(final) == "aid"] <- "origin"
+
+dbWriteTable(condb, "flights", final, row.names=FALSE, append = TRUE)
+
+checkflt <- dbGetQuery(condb, "SELECT * FROM flights LIMIT 10")
+```
+
+## insert data into strikes table
+```{r strikes,echo = FALSE, eval=TRUE,warning=FALSE}
+# add data into strikes
+strikes =  unique(bds.raw[c("rid","impact", "damage", "altitude_ft")])
+
+# creating a df with proper col names needed
+striketable = data.frame(fid = strikes$rid, sid=rownames(strikes), impact = strikes$impact, damage = strikes$damage, altitude = strikes$altitude_ft)
+
+# remove extra commas
+striketable$altitude = sapply(striketable[, 'altitude'], function(x){if(grepl("\\,",x)){return(gsub(",", "", x, fixed = TRUE))} else{return(x)}
+  })
+
+# change it to boolean
+striketable$damage = sapply(striketable[,'damage'], function(x){ if(x=='No damage'){return(FALSE)} else{return(TRUE)}
+  })
+striketable$damage = as.integer(striketable$damage)
+
+# create dummy table with all this info to join on another table with conditions cid
+dbExecute(condb, "DROP TABLE IF EXISTS dummy")
+dbExecute(condb,"create table dummy(
+                  fid int,
+                  sid int,
+                  impact TEXT,
+                  damage bool,
+                  altitude int);")
+
+dbWriteTable(condb, "dummy", striketable, row.names=FALSE, append=TRUE)
+
+checkstr <- dbGetQuery(condb, "SELECT * FROM dummy LIMIT 10")
+```
+
+```{r strikestable,echo = FALSE, eval=TRUE,warning=FALSE}
+# create a temp table with cid from conditions table
+temp = data.frame(unique(df[c("rid", "sky_conditions")]))
+
+dbExecute(condb, "drop table if exists sky")
+dbExecute(condb, "create table sky(
+                  rid int,
+                  sky_conditions text);")
+
+dbWriteTable(condb, "sky", temp, row.names=FALSE, append = TRUE)
+
+sky = dbGetQuery(condb, "select * from sky")
+
+# do a inner join on condition and store it in the final table strikes
+skydata = dbGetQuery(condb,"SELECT * FROM dummy a
+                            INNER JOIN 
+                                  (SELECT b.cid,a.rid FROM sky a
+                                  INNER JOIN conditions b
+                                  ON a.sky_conditions=b.sky_condition) 
+                                  b
+                            ON a.fid = b.rid;
+                            ")
+dbExecute(condb, "drop table if exists sky")
+dbExecute(condb, "drop table if exists dummy")
+
+# select the needed cols
+skydata = skydata[c("fid", "cid", "impact", "damage", "altitude", "sid")]
+names(skydata)[names(skydata) == "cid"] = "conditions"
+
+dbWriteTable(condb, "strikes", skydata, row.names=FALSE, append = TRUE)
+
+checkstr = dbGetQuery(condb, "select * from strikes")
+
+```
+
+## Display tables
+```{r dispairport,echo = FALSE,warning=FALSE, eval=TRUE}
+print("Airport table")
+print(head(dbGetQuery(condb, "SELECT * FROM airports LIMIT 10"), 5))
+```
+
+```{r dispflight,echo = FALSE,warning=FALSE, eval=TRUE}
+print("Flight table")
+print(head(dbGetQuery(condb, "SELECT * FROM flights LIMIT 10"), 5))
+```
+
+```{r dispsky,echo = FALSE,warning=FALSE, eval=TRUE}
+print("conditions table")
+print(head(dbGetQuery(condb, "SELECT * FROM conditions"), 5))
+
+```
+
+```{r dispstrike,echo = FALSE,warning=FALSE,eval=TRUE}
+print("strikes table")
+print(head(dbGetQuery(condb, "SELECT * FROM strikes LIMIT 10"), 5))
+
+```
+## Top Airports with Strikes
+```{r top,echo = FALSE,warning=FALSE,eval=TRUE}
+# top 10 airports are found using two inner joins on flights and airports to group by state
+top10Airports <- dbGetQuery(condb, "SELECT a.airportState AS state, COUNT(s.sid) AS number_of_incidents
+                                    FROM strikes s
+                                    INNER JOIN flights f ON s.fid = f.fid
+                                    INNER JOIN airports a ON f.origin = a.aid
+                                    GROUP BY a.airportState
+                                    ORDER BY number_of_incidents DESC, a.airportState ASC
+                                    LIMIT 10;
+                                    
+                                    
+")
+print((top10Airports))
+```
+
+## Analysis by Airline
+```{r analysisAir,echo = FALSE,warning=FALSE,eval=TRUE}
+# airlines with more than average num of strikes by inner join on flights and grouping by airlines
+strikePerAirline <- dbGetQuery(condb,"SELECT f.airlineName AS airline, 
+                                      COUNT(s.sid) AS num_incidents
+                                      FROM strikes s
+                                      INNER JOIN flights f ON s.fid = f.fid
+                                      GROUP BY f.airlineName
+                                      HAVING COUNT(s.sid) > (SELECT AVG(num_incidents)
+                                                            FROM (
+                                                                SELECT COUNT(sid) AS num_incidents
+                                                                FROM strikes
+                                                                GROUP BY fid) AS avg_count);
+
+                                      ")
+print(strikePerAirline)
+```
+
+## Analysis by Month
+```{r analmonth,echo = FALSE,warning=FALSE,eval=TRUE}
+# strikes by month is just counting ids given the case of that month
+monthlyStrikes <- dbGetQuery(condb, "
+    SELECT 
+        CASE 
+            WHEN f.month = 1 THEN 'January'
+            WHEN f.month = 2 THEN 'February'
+            WHEN f.month = 3 THEN 'March'
+            WHEN f.month = 4 THEN 'April'
+            WHEN f.month = 5 THEN 'May'
+            WHEN f.month = 6 THEN 'June'
+            WHEN f.month = 7 THEN 'July'
+            WHEN f.month = 8 THEN 'August'
+            WHEN f.month = 9 THEN 'September'
+            WHEN f.month = 10 THEN 'October'
+            WHEN f.month = 11 THEN 'November'
+            WHEN f.month = 12 THEN 'December'
+        END AS month,
+        COUNT(f.fid) AS num_strikes
+    FROM flights f
+    GROUP BY f.month
+    ORDER BY f.month
+")
+
+print(monthlyStrikes)
+
+```
+## Trend by Month
+```{r trend,echo = FALSE,warning=FALSE,eval=TRUE}
+# Aggregate the number of strikes by month
+birds_by_month <- aggregate(monthlyStrikes$num_strikes, by = list(month = monthlyStrikes$month), FUN = sum)
+
+# Create a horizontal bar chart
+barplot(birds_by_month$x,
+        names.arg = birds_by_month$month,
+        horiz = TRUE,
+        xlab = "Number of Birds",
+        ylab = "Month",
+        main = "Number of Birds by Month",
+        col = "skyblue",
+        border = "black",
+        las = 1,  # Rotate axis labels
+        xlim = c(0, max(birds_by_month$x) * 1.1),  # Adjust x-axis limits
+        cex.names = 0.8,  # Reduce size of month labels
+        cex.axis = 0.8,  # Reduce size of axis labels
+        cex.lab = 1.4  # Increase size of axis labels
+)
+
+# Add data labels
+text(birds_by_month$x, 1:length(birds_by_month$month), labels = birds_by_month$x, pos = 4)
+
+# Add legend
+legend("bottomright", legend = "Number of Birds", fill = "skyblue", bty = "n")
+
+```
+## Test the stored procedure by removing a strike
+
+```{r procedure, echo=FALSE,eval=TRUE}
+dbExecute(condb, "DROP PROCEDURE if exists RemoveStrike;")
+dbExecute(condb, "CREATE PROCEDURE RemoveStrike(IN strike_id INT)
+BEGIN
+    DELETE FROM strikes WHERE sid = strike_id;
+    INSERT INTO audit_log (modification_type, table_name, modification_time, primary_key_str)
+    VALUES ('Removal', 'strikes', CURRENT_TIMESTAMP, strike_id);
+END ")
+```
+
+```{r delete, echo=FALSE,eval=TRUE}
+# Create the audit log table if it does not exist
+dbExecute(condb,"CREATE TABLE IF NOT EXISTS audit_log (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    modification_type VARCHAR(20),
+    table_name VARCHAR(50),
+    modification_time DATETIME,
+    primary_key_str INT
+);"
+)
+
+dbExecute(condb, "CALL RemoveStrike(2)")
+# Query the audit log to verify the removal is logged
+audit_log <- dbGetQuery(condb, "SELECT * FROM audit_log")
+print(audit_log)
+
+
+```
+
+```{r exit,echo=FALSE}
+
+# Close the database connection when done
+dbDisconnect(condb)
+```
+
